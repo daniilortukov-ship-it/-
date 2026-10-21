@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#f7dce8">
+<title>Моя путеводная звёздочка 🌹</title>
+<link rel="preconnect" href="https://fonts.cdnfonts.com">
+<link rel="stylesheet" href="https://fonts.cdnfonts.com/css/adventure">
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #f7dce8;
+  }
+  body { font-family: 'Adventure', Georgia, serif; }
+  canvas { display: block; width: 100%; height: 100%; }
+  .message {
+    position: fixed;
+    z-index: 2;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .04em;
+    width: max-content;
+    max-width: 94vw;
+    color: #df4d87;
+    font-family: 'Adventure', Georgia, serif;
+    font-size: 20px;
+    font-weight: 400;
+    line-height: 1.08;
+    text-align: center;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    text-shadow: 0 1px 0 rgba(255,255,255,.34), 0 0 10px rgba(218,64,124,.10);
+    will-change: opacity;
+  }
+  .message .line { display: block; width: max-content; }
+  .rose-space {
+    display: inline-block;
+    width: 1.24em;
+    height: .95em;
+    margin-left: .18em;
+    vertical-align: -.04em;
+  }
+  .hint {
+    position: fixed;
+    left: 50%;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    color: rgba(139, 63, 94, .34);
+    font: 12px/1.4 system-ui, sans-serif;
+    pointer-events: none;
+    transition: opacity .8s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas" aria-label="Розовые частицы складываются в сердце с признанием и золотой путеводной звездой"></canvas>
+<div class="message" id="message" aria-label="Ты моя путеводная звездочка. Среди тысячи одинаковых ты особенная!">
+  <span class="line">ты моя путеводная</span>
+  <span class="line">звездочка.</span>
+  <span class="line">Среди тысячи одинаковых</span>
+  <span class="line">ты - особенная!<span class="rose-space" aria-hidden="true"></span></span>
+</div>
+<div class="hint" id="hint">❤️</div>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  const message = document.getElementById("message");
+  const hint = document.getElementById("hint");
+  let W = 0, H = 0, DPR = 1;
+  let particles = [], targets = [], star = null, composition = null;
+  let startTime = 0, initialized = false, formationStarted = false, resizeTimer = 0;
+
+  // Five times the original particle count: 850 -> 4250 and 1250 -> 6250.
+  const PARTICLE_COUNT_DESKTOP = 6250;
+  const PARTICLE_COUNT_MOBILE = 4250;
+  const PINK = "#df4d87";
+  const LINES = [
+    "ты моя путеводная",
+    "звездочка.",
+    "Среди тысячи одинаковых",
+    "ты - особенная!"
+  ];
+  const FONT_FAMILY = "Adventure, Georgia, serif";
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function smooth(v) { v = clamp(v, 0, 1); return v * v * (3 - 2 * v); }
+
+  function resizeCanvas() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  // Heart coordinates are local to the centre of the composition.
+  function heartPoint(t, scale) {
+    const x = 16 * Math.pow(Math.sin(t), 3);
+    const y = -(13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t));
+    return { x: x * scale, y: y * scale };
+  }
+
+  function buildHeartPolygon(scale, segments = 520) {
+    const poly = [];
+    for (let i = 0; i < segments; i++) poly.push(heartPoint(i / segments * Math.PI * 2, scale));
+    return poly;
+  }
+
+  function pointInPolygon(point, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const a = polygon[i], b = polygon[j];
+      const intersects = ((a.y > point.y) !== (b.y > point.y)) &&
+        (point.x < (b.x - a.x) * (point.y - a.y) / ((b.y - a.y) || 0.000001) + a.x);
+      if (intersects) inside = !inside;
+    }
+    return inside;
+  }
+
+  function evenOutlinePoints(count, scale) {
+    const dense = [];
+    const n = 2600;
+    for (let i = 0; i <= n; i++) dense.push(heartPoint(i / n * Math.PI * 2, scale));
+    const cumulative = [0];
+    for (let i = 1; i < dense.length; i++) {
+      cumulative.push(cumulative[i-1] + Math.hypot(dense[i].x-dense[i-1].x, dense[i].y-dense[i-1].y));
+    }
+    const total = cumulative[cumulative.length - 1];
+    const result = [];
+    let seg = 1;
+    for (let i = 0; i < count; i++) {
+      const d = total * i / count;
+      while (seg < cumulative.length - 1 && cumulative[seg] < d) seg++;
+      const span = cumulative[seg] - cumulative[seg-1] || 1;
+      const f = (d - cumulative[seg-1]) / span;
+      result.push({
+        x: dense[seg-1].x + (dense[seg].x-dense[seg-1].x)*f + rand(-.36,.36),
+        y: dense[seg-1].y + (dense[seg].y-dense[seg-1].y)*f + rand(-.36,.36)
+      });
+    }
+    return result;
+  }
+
+  function getInkSamples(canvasEl, step = 1.05) {
+    const c = canvasEl.getContext("2d");
+    const { data, width, height } = c.getImageData(0, 0, canvasEl.width, canvasEl.height);
+    const samples = [];
+    for (let y0 = .3; y0 < height; y0 += step) {
+      for (let x0 = .3; x0 < width; x0 += step) {
+        const x = Math.min(width - 1, Math.max(0, Math.floor(x0 + rand(-.22, .22))));
+        const y = Math.min(height - 1, Math.max(0, Math.floor(y0 + rand(-.22, .22))));
+        if (data[(y * width + x) * 4 + 3] > 75) samples.push({ x: x0, y: y0 });
+      }
+    }
+    return samples;
+  }
+
+  function chooseSamples(candidates, count) {
+    if (!candidates.length) return Array.from({ length: count }, () => ({ x: 0, y: 0 }));
+    const shuffled = candidates.slice();
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const result = [];
+    for (let i = 0; i < count; i++) {
+      const p = shuffled[i % shuffled.length];
+      const repeated = i >= shuffled.length;
+      result.push({
+        x: p.x + (repeated ? rand(-.35, .35) : 0),
+        y: p.y + (repeated ? rand(-.35, .35) : 0)
+      });
+    }
+    return result;
+  }
+
+  function getTextMetrics(scale) {
+    const baseSize = clamp(W * .050, 17, 31);
+    const measurer = document.createElement("canvas").getContext("2d");
+    measurer.font = `${baseSize}px ${FONT_FAMILY}`;
+    const widths = LINES.map(line => measurer.measureText(line).width);
+    const roseSlotWidth = baseSize * 1.42;
+    const groupLineWidth = widths[3] + roseSlotWidth;
+    const longest = Math.max(widths[0], widths[1], widths[2], groupLineWidth);
+    const available = Math.min(W * .82, scale * 25.0);
+    const fittedSize = baseSize * Math.min(1, available / Math.max(1, longest) * .97);
+    const fontSize = Math.max(13, fittedSize);
+    message.style.fontSize = `${fontSize}px`;
+    message.style.lineHeight = "1.08";
+    message.style.gap = `${fontSize * .04}px`;
+
+    measurer.font = `${fontSize}px ${FONT_FAMILY}`;
+    const fittedWidths = LINES.map(line => measurer.measureText(line).width);
+    const fittedRoseWidth = fontSize * 1.42;
+    const canvasWidth = Math.ceil(Math.max(fittedWidths[0], fittedWidths[1], fittedWidths[2], fittedWidths[3] + fittedRoseWidth) + 12);
+    const lineHeight = fontSize * 1.12;
+    return { fontSize, lineHeight, widths: fittedWidths, roseSlotWidth: fittedRoseWidth, canvasWidth, canvasHeight: Math.ceil(lineHeight * 4 + 10) };
+  }
+
+  function makeTextMask(metrics) {
+    const off = document.createElement("canvas");
+    off.width = metrics.canvasWidth;
+    off.height = metrics.canvasHeight;
+    const c = off.getContext("2d");
+    c.clearRect(0, 0, off.width, off.height);
+    c.fillStyle = PINK;
+    c.textAlign = "center";
+    c.textBaseline = "middle";
+    c.font = `${metrics.fontSize}px ${FONT_FAMILY}`;
+    for (let i = 0; i < 3; i++) {
+      c.fillText(LINES[i], off.width / 2, 5 + metrics.lineHeight * (i + .5));
+    }
+    // Last line + an empty rose-sized slot are centred as one group.
+    const lastStartX = (off.width - (metrics.widths[3] + metrics.roseSlotWidth)) / 2;
+    c.textAlign = "left";
+    c.fillText(LINES[3], lastStartX, 5 + metrics.lineHeight * 3.5);
+    return { canvas: off, lastStartX, lastLineY: 5 + metrics.lineHeight * 3.5 };
+  }
+
+  function makeRoseMask(metrics) {
+    const off = document.createElement("canvas");
+    const size = Math.ceil(metrics.fontSize * 1.55);
+    off.width = size;
+    off.height = size;
+    const c = off.getContext("2d");
+    c.clearRect(0, 0, size, size);
+    c.textAlign = "center";
+    c.textBaseline = "middle";
+    c.font = `${metrics.fontSize * 1.22}px "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif`;
+    c.fillStyle = "#ff6d9f";
+    c.fillText("🌹", size / 2, size / 2 + .5);
+    return off;
+  }
+
+  function drawRoseSilhouette(c, cx, cy, size) {
+    c.save();
+    c.translate(cx, cy);
+    c.scale(size / 16, size / 16);
+    c.lineCap = "round";
+    c.lineJoin = "round";
+    c.fillStyle = "#ff6d9f";
+    c.strokeStyle = "#ff6d9f";
+    c.lineWidth = 1.8;
+    c.beginPath(); c.moveTo(0, 2.5); c.quadraticCurveTo(-.7, 5.5, -.5, 8.5); c.stroke();
+    c.beginPath(); c.moveTo(-.2, 5.7); c.quadraticCurveTo(-5.5, 3.8, -5.8, 1.2); c.quadraticCurveTo(-2.1, 1.2, -.2, 5.7); c.fill();
+    c.beginPath(); c.moveTo(-.4, 7.1); c.quadraticCurveTo(4.4, 5.4, 5.2, 2.8); c.quadraticCurveTo(1.4, 2.8, -.4, 7.1); c.fill();
+    c.beginPath(); c.moveTo(0, 3.1); c.bezierCurveTo(-5.8, 1.3, -5.1, -4.5, -1.7, -5.4); c.bezierCurveTo(-.9, -8.7, 3.7, -7.5, 4.2, -4.2); c.bezierCurveTo(7.2, -2.3, 4.7, 1.4, 0, 3.1); c.fill();
+    c.beginPath(); c.moveTo(-3.9, -4.4); c.quadraticCurveTo(-1.4, -2.1, .2, -4.1); c.quadraticCurveTo(2.1, -5.8, 3.7, -4.1); c.stroke();
+    c.restore();
+  }
+
+  function buildTargets() {
+    const count = W < 600 ? PARTICLE_COUNT_MOBILE : PARTICLE_COUNT_DESKTOP;
+    const scale = Math.min(W * .92 / 32, H * .60 / 29);
+    const origin = { x: W / 2, y: H / 2 - 2.54 * scale };
+    const metrics = getTextMetrics(scale);
+    const mask = makeTextMask(metrics);
+    const ink = getInkSamples(mask.canvas, 1.0);
+    const roseMask = makeRoseMask(metrics);
+    const roseInk = getInkSamples(roseMask, .9);
+
+    // The lettering receives the majority of the points so its dotted shape is clear.
+    const outlineCount = Math.floor(count * .24);
+    const textCount = Math.floor(count * .60);
+    const roseCount = Math.floor(count * .05);
+    const fillCount = count - outlineCount - textCount - roseCount;
+    const outline = evenOutlinePoints(outlineCount, scale);
+    const textCenter = { x: origin.x, y: origin.y - .10 * scale };
+    const textPoints = chooseSamples(ink, textCount).map(p => ({
+      x: textCenter.x + p.x - mask.canvas.width / 2,
+      y: textCenter.y + p.y - mask.canvas.height / 2
+    }));
+
+    // Rose particles stay visible after the lettering changes into ordinary text.
+    const roseX = origin.x + mask.lastStartX + metrics.widths[3] + metrics.roseSlotWidth * .52 - mask.canvas.width / 2;
+    const roseY = textCenter.y + mask.lastLineY - mask.canvas.height / 2;
+    const rosePoints = chooseSamples(roseInk, roseCount).map(p => ({
+      x: roseX + p.x - roseMask.width / 2,
+      y: roseY + p.y - roseMask.height / 2
+    }));
+    const starTarget = { x: origin.x, y: origin.y + 7.8 * scale };
+    const polygon = buildHeartPolygon(scale);
+    const exclusionW = mask.canvas.width / 2 + metrics.roseSlotWidth * .15 + 5;
+    const exclusionH = mask.canvas.height / 2 + 8;
+    const fill = [];
+    let attempts = 0;
+    while (fill.length < fillCount && attempts < fillCount * 90) {
+      attempts++;
+      const p = { x: rand(-16 * scale, 16 * scale), y: rand(-12.2 * scale, 17.1 * scale) };
+      if (!pointInPolygon(p, polygon)) continue;
+      const ax = origin.x + p.x, ay = origin.y + p.y;
+      if (Math.abs(ax - textCenter.x) < exclusionW && Math.abs(ay - textCenter.y) < exclusionH) continue;
+      if (Math.hypot(ax - starTarget.x, ay - starTarget.y) < scale * 2.55) continue;
+      fill.push(p);
+    }
+    while (fill.length < fillCount) fill.push(heartPoint(rand(0, Math.PI * 2), scale * rand(.25, .88)));
+
+    targets = [];
+    outline.forEach(p => targets.push({ x: origin.x + p.x, y: origin.y + p.y, kind: "outline" }));
+    textPoints.forEach(p => targets.push({ ...p, kind: "text" }));
+    rosePoints.forEach(p => targets.push({ ...p, kind: "rose" }));
+    fill.forEach(p => targets.push({ x: origin.x + p.x, y: origin.y + p.y, kind: "fill" }));
+    composition = { scale, origin, textCenter, metrics };
+    message.style.left = `${textCenter.x}px`;
+    message.style.top = `${textCenter.y}px`;
+
+    const startX = star ? star.x : rand(W * .18, W * .82);
+    const startY = star ? star.y : rand(H * .2, H * .78);
+    star = { x: startX, y: startY, startX, startY, tx: starTarget.x, ty: starTarget.y, scale };
+    return count;
+  }
+
+  function createParticles(count) {
+    particles = [];
+    for (let i = 0; i < count; i++) {
+      particles.push({
+        x: rand(0, W), y: rand(0, H),
+        vx: rand(-.16, .16), vy: rand(-.13, .13),
+        phase: rand(0, Math.PI * 2),
+        radius: rand(.92, 1.52),
+        alpha: rand(.72, .99)
+      });
+    }
+  }
+
+  function drawParticle(x, y, radius, alpha, phase, time, kind) {
+    const twinkle = .88 + .12 * Math.sin(time * .0018 + phase);
+    ctx.globalAlpha = alpha * twinkle;
+    ctx.fillStyle = PINK;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function starPath(cx, cy, r, rotation) {
+    ctx.beginPath();
+    for (let i = 0; i < 32; i++) {
+      const a = rotation - Math.PI / 2 + i * Math.PI / 16;
+      let k;
+      if (i % 8 === 0) k = 2.22;
+      else if (i % 8 === 4) k = 1.38;
+      else if (i % 2 === 0) k = .43;
+      else k = .15;
+      const x = cx + Math.cos(a) * r * k;
+      const y = cy + Math.sin(a) * r * k;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+  }
+
+  function drawStar(time, progress) {
+    if (!star) return;
+    const eased = 1 - Math.pow(1 - clamp(progress, 0, 1), 3);
+    const swayX = formationStarted ? 0 : Math.sin(time * .00045) * 8;
+    const swayY = formationStarted ? 0 : Math.cos(time * .00037) * 7;
+    const x = star.startX + (star.tx - star.startX) * eased + swayX;
+    const y = star.startY + (star.ty - star.startY) * eased + swayY;
+    star.x = x; star.y = y;
+    const pulse = 1 + .075 * Math.sin(time * .0048);
+    const r = clamp(star.scale * 1.05, 8, 16.5) * pulse;
+
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+    const glow = ctx.createRadialGradient(x, y, r * .15, x, y, r * 4.25);
+    glow.addColorStop(0, "rgba(255, 191, 24, .40)");
+    glow.addColorStop(.22, "rgba(255, 190, 31, .24)");
+    glow.addColorStop(.58, "rgba(255, 179, 28, .08)");
+    glow.addColorStop(1, "rgba(255, 179, 28, 0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(x, y, r * 4.25, 0, Math.PI * 2); ctx.fill();
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(time * .00012);
+    ctx.strokeStyle = "rgba(231, 164, 36, .34)";
+    ctx.lineWidth = .7;
+    ctx.beginPath(); ctx.ellipse(0, 0, r * 2.15, r * 1.48, -.32, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = "rgba(255, 192, 49, .70)";
+    ctx.lineCap = "round";
+    for (let i = 0; i < 8; i++) {
+      const a = i * Math.PI / 4;
+      const inner = r * (i % 2 ? 1.50 : 1.78);
+      const outer = r * (i % 2 ? 2.0 : 2.55);
+      ctx.lineWidth = i % 2 ? .55 : .9;
+      ctx.beginPath(); ctx.moveTo(Math.cos(a)*inner, Math.sin(a)*inner); ctx.lineTo(Math.cos(a)*outer, Math.sin(a)*outer); ctx.stroke();
+    }
+    ctx.restore();
+
+    starPath(x, y, r, Math.sin(time * .0003) * .025);
+    const outerGrad = ctx.createRadialGradient(x-r*.13, y-r*.2, r*.1, x, y, r*2.25);
+    outerGrad.addColorStop(0, "#fff2a4");
+    outerGrad.addColorStop(.35, "#ffd849");
+    outerGrad.addColorStop(.72, "#ffc12a");
+    outerGrad.addColorStop(1, "#e9950b");
+    ctx.fillStyle = outerGrad; ctx.fill();
+    ctx.strokeStyle = "rgba(225, 145, 9, .78)"; ctx.lineWidth = .85; ctx.stroke();
+
+    starPath(x, y, r * .53, -Math.sin(time * .0003) * .04);
+    const innerGrad = ctx.createRadialGradient(x-r*.1, y-r*.14, .2, x, y, r*1.15);
+    innerGrad.addColorStop(0, "#fff9ce"); innerGrad.addColorStop(.38, "#ffe879"); innerGrad.addColorStop(1, "#ffb813");
+    ctx.fillStyle = innerGrad; ctx.fill();
+    const core = ctx.createRadialGradient(x-r*.14, y-r*.16, .1, x, y, r*.42);
+    core.addColorStop(0, "#fffbe2"); core.addColorStop(.35, "#fff0a0"); core.addColorStop(1, "#ffc52a");
+    ctx.fillStyle = core; ctx.beginPath(); ctx.arc(x, y, r*.39, 0, Math.PI*2); ctx.fill();
+
+    for (let i = 0; i < 3; i++) {
+      const a = time * .0007 + i * Math.PI * 2 / 3;
+      const ox = x + Math.cos(a) * r * (2.45 + .16 * Math.sin(time*.001+i));
+      const oy = y + Math.sin(a) * r * 1.8;
+      ctx.fillStyle = i === 0 ? "rgba(255, 205, 61, .96)" : "rgba(255, 190, 47, .72)";
+      ctx.beginPath(); ctx.arc(ox, oy, i === 0 ? 1.4 : .8, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function draw(time) {
+    if (!initialized) return;
+    const elapsed = time - startTime;
+    const morph = smooth((elapsed - 3000) / 4200);
+    if (elapsed >= 3000) formationStarted = true;
+    const textSwap = smooth((elapsed - 8200) / 1300);
+
+    const bg = ctx.createRadialGradient(W*.5, H*.43, 0, W*.5, H*.5, Math.max(W,H)*.76);
+    bg.addColorStop(0, "#fff0f6");
+    bg.addColorStop(.52, "#f9dce8");
+    bg.addColorStop(1, "#f0c8da");
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const target = targets[i];
+      if (!formationStarted) {
+        p.x += p.vx + Math.sin(time * .00045 + p.phase) * .055;
+        p.y += p.vy + Math.cos(time * .00035 + p.phase) * .045;
+        if (p.x < -5) p.x = W + 5;
+        if (p.x > W + 5) p.x = -5;
+        if (p.y < -5) p.y = H + 5;
+        if (p.y > H + 5) p.y = -5;
+      } else if (target) {
+        const speed = .018 + .075 * morph;
+        p.x += (target.x - p.x) * speed;
+        p.y += (target.y - p.y) * speed;
+        const settle = .25 + morph * .75;
+        p.x += Math.sin(time * .0017 + p.phase) * .055 * settle;
+        p.y += Math.cos(time * .0015 + p.phase) * .055 * settle;
+      }
+      let alpha = p.alpha;
+      if (target && target.kind === "text") alpha *= 1 - textSwap;
+      const radius = target && target.kind === "text" ? p.radius * 1.05 : p.radius;
+      drawParticle(p.x, p.y, radius, alpha, p.phase, time, target && target.kind);
+    }
+
+    // First the dot-lettering is fully readable; then it dissolves into the Adventure font.
+    message.style.opacity = String(textSwap);
+    drawStar(time, clamp((elapsed - 3000) / 5000, 0, 1));
+    hint.style.opacity = elapsed > 2500 ? "0" : String(Math.max(0, 1 - elapsed / 2500));
+    requestAnimationFrame(draw);
+  }
+
+  function rebuildForViewport() {
+    resizeCanvas();
+    const count = buildTargets();
+    if (particles.length !== count) createParticles(count);
+    if (star) { star.startX = star.x; star.startY = star.y; }
+  }
+
+  function init() {
+    if (initialized) return;
+    initialized = true;
+    resizeCanvas();
+    const count = buildTargets();
+    createParticles(count);
+    startTime = performance.now();
+    requestAnimationFrame(draw);
+  }
+
+  // Start immediately even if the remote font server is slow or unavailable.
+  // If Adventure arrives quickly, rebuild the targets before the gathering animation begins.
+  init();
+  function refreshFontIfEarly() {
+    document.fonts.load("24px Adventure").then(() => {
+      if (initialized && performance.now() - startTime < 2900) rebuildForViewport();
+    }).catch(() => {});
+  }
+  window.addEventListener("load", refreshFontIfEarly, { once: true });
+  if (document.readyState === "complete") refreshFontIfEarly();
+
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (!initialized) { resizeCanvas(); return; }
+      rebuildForViewport();
+    }, 120);
+  });
+})();
+</script>
+</body>
+</html>
